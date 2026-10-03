@@ -1,0 +1,39 @@
+MI FIRMA - plataforma propia de firma electronica
+=================================================
+
+COMO FUNCIONA
+1. Entras con tu contrasena, subis un PDF y cargas quien tiene que firmar.
+2. El sistema te da un link por cada firmante (con boton de WhatsApp y email).
+3. La otra persona abre el link en su celular, ve el documento, firma con el dedo y listo.
+   No instala nada ni crea cuenta.
+4. Cuando firman todos, descargas el PDF final con la hoja de firmas y el
+   expediente de evidencias (huella SHA-256, fecha, hora, IP, dispositivo).
+5. En /verificar cualquiera puede subir el PDF firmado y comprobar que es autentico.
+
+PROBARLO EN TU COMPUTADORA
+  npm install
+  ADMIN_PASSWORD=tu-clave npm start      (en Windows PowerShell: $env:ADMIN_PASSWORD="tu-clave"; npm start)
+  Abri http://localhost:3000
+  (Para que un celular lo abra, tiene que estar publicado en internet: ver abajo.)
+
+PUBLICARLO EN TU SERVIDOR (DonWeb + Coolify)
+1. Subi esta carpeta (sin node_modules) a un repositorio de GitHub.
+2. En Coolify: Projects > tu proyecto > New Resource > Public Repository (o Private).
+   Pega la URL del repo. Build Pack: Dockerfile. Puerto: 3000.
+3. En Environment Variables agrega:
+     ADMIN_PASSWORD = una clave larga y tuya
+     DATA_DIR       = /data
+     BRAND_NAME     = el nombre de tu servicio (opcional)
+4. En Storages agrega un Volume Mount con destino /data
+   (ahi se guardan documentos, firmas y base de datos; sin esto se pierden al actualizar).
+5. En Domains pone https://firma.tudominio.com.ar y crea en tu DNS un registro A
+   apuntando a la IP del servidor.
+6. Deploy. Coolify saca el candado HTTPS solo.
+
+LIMITES ACTUALES (version 1)
+- Es firma electronica SIMPLE: sirve para contratos comunes, autorizaciones, conformidades.
+  No reemplaza firma digital con certificado ni actos que exigen escribano.
+- La firma queda en una "Hoja de firmas" agregada al final del PDF (no se elige
+  el lugar exacto dentro de la pagina).
+- Los links los enviás vos (WhatsApp/email manual); no hay envios ni recordatorios automaticos.
+- Sin verificacion de identidad por SMS o selfie.
