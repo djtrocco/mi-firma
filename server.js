@@ -3,6 +3,7 @@ const express = require('express');
 const multer = require('multer');
 const Database = require('better-sqlite3');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+const QRCode = require('qrcode');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -35,6 +36,13 @@ CREATE TABLE IF NOT EXISTS signers (
   signed_at TEXT, signed_name TEXT, ip TEXT, ua TEXT, signature_png BLOB, opened_at TEXT
 );
 `);
+// Migración segura: agrega las columnas de revocación si la base es anterior
+{
+  const cols = db.prepare('PRAGMA table_info(documents)').all().map((c) => c.name);
+  for (const c of ['revoked_at', 'revoked_reason', 'revoked_ip']) {
+    if (!cols.includes(c)) db.exec(`ALTER TABLE documents ADD COLUMN ${c} TEXT`);
+  }
+}
 
 // ---------- utilidades ----------
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
@@ -102,7 +110,8 @@ input[type=text],input[type=password],input[type=file],textarea{width:100%;paddi
 .btn.wa{background:#1fa855}.btn.red{background:#b3261e}.btn.small{padding:8px 12px;font-size:14px}
 .btn[disabled]{opacity:.45;cursor:not-allowed}
 .badge{display:inline-block;border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600}
-.b-ok{background:#dff5e8;color:var(--ok)}.b-pend{background:#fff0d6;color:var(--warn)}
+.b-ok{background:#dff5e8;color:var(--ok)}.b-pend{background:#fff0d6;color:var(--warn)}.b-rev{background:#fde8e6;color:#8f1d16}
+summary{cursor:pointer}
 table{width:100%;border-collapse:collapse}td,th{padding:10px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:15px}
 .row{display:flex;gap:10px;flex-wrap:wrap}.row>*{flex:1 1 200px}
 .mut{color:var(--mut);font-size:14px}.err{background:#fde8e6;color:#8f1d16;padding:10px 12px;border-radius:8px;margin-bottom:12px}
@@ -146,7 +155,7 @@ app.get('/', requireAdmin, (req, res) => {
   const m = Object.fromEntries(cnt.map((c) => [c.doc_id, c]));
   const rows = docs.map((d) => {
     const c = m[d.id] || { t: 0, f: 0 };
-    const badge = d.status === 'firmado' ? '<span class="badge b-ok">Firmado</span>' : '<span class="badge b-pend">Pendiente</span>';
+    const badge = d.revoked_at ? '<span class="badge b-rev">Revocado</span>' : (d.status === 'firmado' ? '<span class="badge b-ok">Firmado</span>' : '<span class="badge b-pend">Pendiente</span>');
     return `<tr><td><a href="/doc/${d.id}"><b>${esc(d.title)}</b></a><div class="mut">${fmtDate(d.created_at)}</div></td><td>${c.f || 0}/${c.t}</td><td>${badge}</td></tr>`;
   }).join('');
   res.send(page('Documentos', `<h1>Documentos</h1><p><a class="btn" href="/nuevo">+ Enviar un documento a firmar</a></p><div class="card">${docs.length ? `<table><tr><th>Documento</th><th>Firmas</th><th>Estado</th></tr>${rows}</table>` : '<p class="mut">Todavía no enviaste ningún documento.</p>'}</div>`, req, { admin: true }));
@@ -205,15 +214,41 @@ app.get('/doc/:id', requireAdmin, (req, res) => {
     const wa = waLink(s.contact, msg);
     const mail = String(s.contact).includes('@') ? `mailto:${s.contact}?subject=${encodeURIComponent('Documento para firmar: ' + d.title)}&body=${encodeURIComponent(msg)}` : null;
     const st = s.status === 'firmado' ? `<span class="badge b-ok">Firmó ${fmtDate(s.signed_at)}</span>` : (s.opened_at ? '<span class="badge b-pend">Lo abrió, falta firmar</span>' : '<span class="badge b-pend">Sin abrir</span>');
-    return `<div class="card"><b>${esc(s.name)}</b> ${esc(s.contact)}<div style="margin:6px 0">${st}</div>${s.status === 'firmado' ? '' : `<div class="link"><input type="text" readonly value="${esc(url)}" onclick="this.select()" style="flex:1 1 240px">${wa ? `<a class="btn wa small" target="_blank" rel="noopener" href="${esc(wa)}">Enviar por WhatsApp</a>` : ''}${mail ? `<a class="btn small sec" href="${esc(mail)}">Enviar por email</a>` : ''}<button type="button" class="btn small sec" onclick="navigator.clipboard.writeText('${esc(url)}');this.textContent='¡Copiado!'">Copiar link</button></div>`}</div>`;
+    return `<div class="card"><b>${esc(s.name)}</b> ${esc(s.contact)}<div style="margin:6px 0">${st}</div>${(s.status === 'firmado' || d.revoked_at) ? '' : `<div class="link"><input type="text" readonly value="${esc(url)}" onclick="this.select()" style="flex:1 1 240px">${wa ? `<a class="btn wa small" target="_blank" rel="noopener" href="${esc(wa)}">Enviar por WhatsApp</a>` : ''}${mail ? `<a class="btn small sec" href="${esc(mail)}">Enviar por email</a>` : ''}<button type="button" class="btn small sec" onclick="navigator.clipboard.writeText('${esc(url)}');this.textContent='¡Copiado!'">Copiar link</button></div>`}</div>`;
   }).join('');
   const done = d.status === 'firmado';
-  res.send(page(d.title, `<p><a href="/">← Volver</a></p><h1>${esc(d.title)}</h1>
-<p>${done ? '<span class="badge b-ok">Todas las firmas completas</span>' : '<span class="badge b-pend">Esperando firmas</span>'} <span class="mut">Creado ${fmtDate(d.created_at)}</span></p>
+  const revBanner = d.revoked_at ? `<div class="err"><b>Documento REVOCADO</b> el ${fmtDate(d.revoked_at)}.<br>Motivo: ${esc(d.revoked_reason)}<br><a href="/doc/${d.id}/constancia" target="_blank"><b>Descargar constancia de revocación (PDF)</b></a></div>` : '';
+  const revForm = d.revoked_at ? '' : `<details class="card"><summary><b>Revocar este documento</b></summary>
+<p class="mut">El documento y sus pruebas se conservan intactos. Queda registrado que dejó de estar vigente, con fecha, hora y motivo, y la página de verificación lo mostrará. <b>No se puede deshacer.</b>${done ? '' : ' Como todavía faltan firmas, los links pendientes dejarán de funcionar.'}</p>
+<form method="post" action="/doc/${d.id}/revocar"><label>Motivo de la revocación (obligatorio)</label><textarea name="reason" rows="3" maxlength="500" required></textarea>
+<label class="consent"><input type="checkbox" required><span>Entiendo que la revocación no se puede deshacer.</span></label>
+<button class="btn red">Revocar documento</button></form></details>`;
+  res.send(page(d.title, `<p><a href="/">← Volver</a></p><h1>${esc(d.title)}</h1>${revBanner}
+<p>${d.revoked_at ? '<span class="badge b-rev">Revocado</span>' : (done ? '<span class="badge b-ok">Todas las firmas completas</span>' : '<span class="badge b-pend">Esperando firmas</span>')} <span class="mut">Creado ${fmtDate(d.created_at)}</span></p>
 <p><a class="btn sec small" href="/doc/${d.id}/original" target="_blank">Ver original</a> ${done ? `<a class="btn small" href="/doc/${d.id}/firmado">Descargar PDF firmado</a>` : ''}</p>
 <h2>Firmantes</h2>${rows}
 <div class="card mut">Huella SHA-256 del original:<br><span class="mono">${d.sha256}</span>${done ? `<br><br>Huella del PDF firmado:<br><span class="mono">${d.final_sha256}</span>` : ''}</div>
+${revForm}
 <form method="post" action="/doc/${d.id}/eliminar" onsubmit="return confirm('¿Eliminar este documento y sus firmas? No se puede deshacer.')"><button class="btn red small">Eliminar documento</button></form>`, req, { admin: true }));
+});
+app.post('/doc/:id/revocar', requireAdmin, (req, res) => {
+  const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
+  if (!d) return res.status(404).send('No existe');
+  const reason = String(req.body.reason || '').trim().slice(0, 500);
+  if (reason.length < 3) return res.status(400).send('Falta el motivo de la revocación.');
+  if (!d.revoked_at) {
+    db.prepare('UPDATE documents SET revoked_at=?, revoked_reason=?, revoked_ip=? WHERE id=? AND revoked_at IS NULL')
+      .run(new Date().toISOString(), reason, clientIp(req), d.id);
+  }
+  res.redirect('/doc/' + d.id);
+});
+app.get('/doc/:id/constancia', requireAdmin, async (req, res) => {
+  const d = db.prepare('SELECT * FROM documents WHERE id=?').get(req.params.id);
+  if (!d || !d.revoked_at) return res.status(404).send('Este documento no está revocado');
+  const sg = db.prepare('SELECT name,signed_name,status,signed_at FROM signers WHERE doc_id=? ORDER BY id').all(d.id);
+  const out = await buildRevocationPdf(d, sg, baseUrl(req));
+  res.set('Content-Disposition', 'attachment; filename="constancia-de-revocacion.pdf"');
+  res.type('pdf').send(out);
 });
 app.get('/doc/:id/original', requireAdmin, (req, res) => {
   const f = path.join(DATA_DIR, 'docs', path.basename(req.params.id) + '.pdf');
@@ -243,11 +278,14 @@ body{background:#eef0f8}main{padding:12px;max-width:640px}
 .consent{display:flex;gap:10px;align-items:flex-start;margin:14px 0;font-size:15px}.consent input{width:22px;height:22px;margin-top:2px;flex:none}
 `;
 function loadSigner(token) {
-  return db.prepare('SELECT s.*, d.title, d.status dstatus FROM signers s JOIN documents d ON d.id=s.doc_id WHERE s.token=?').get(String(token));
+  return db.prepare('SELECT s.*, d.title, d.status dstatus, d.revoked_at FROM signers s JOIN documents d ON d.id=s.doc_id WHERE s.token=?').get(String(token));
 }
 app.get('/firmar/:token', (req, res) => {
   const s = loadSigner(req.params.token);
   if (!s) return res.status(404).send(page('Link no válido', '<div class="card"><h1>Link no válido</h1><p>Este link no existe o fue eliminado.</p></div>', req));
+  if (s.revoked_at) {
+    return res.send(page('Documento revocado', `<div class="card"><h1>Documento revocado</h1><p><b>${esc(s.title)}</b></p><p>Este documento fue revocado el ${fmtDate(s.revoked_at)} y ya no está vigente${s.status === 'firmado' ? '. Tu firma quedó registrada, pero el documento dejó de tener efecto como firmado' : ', por lo que ya no se puede firmar'}.</p><p class="mut">Si tenés dudas, comunicate con quien te lo envió.</p></div>`, req));
+  }
   if (!s.opened_at) db.prepare('UPDATE signers SET opened_at=? WHERE id=?').run(new Date().toISOString(), s.id);
   if (s.status === 'firmado') {
     return res.send(page('Ya firmado', `<div class="card"><h1>✓ Ya firmaste este documento</h1><p><b>${esc(s.title)}</b></p><p class="mut">Firmado el ${fmtDate(s.signed_at)}.</p>${s.dstatus === 'firmado' ? `<p><a class="btn" href="/firmar/${s.token}/descargar">Descargar copia firmada</a></p>` : '<p class="mut">Cuando firmen todas las partes vas a poder descargar la copia final desde este mismo link.</p>'}</div>`, req));
@@ -255,14 +293,20 @@ app.get('/firmar/:token', (req, res) => {
   const body = `<div class="card"><h1 style="margin-top:0">Hola ${esc(s.name)}</h1><p>Te pidieron firmar: <b>${esc(s.title)}</b></p>
 <div class="pdfwrap" id="pages"><p class="mut" style="padding:16px">Cargando documento…</p></div>
 <p class="mut">Podés hacer zoom con los dedos. <a href="/firmar/${s.token}/pdf" target="_blank">Abrir el PDF aparte</a></p></div>
-<div class="card"><h2>Tu firma</h2>
+<div class="card" id="formcard"><h2>Tu firma</h2>
 <label>Escribí tu nombre completo</label><input type="text" id="nm" value="${esc(s.name)}" autocomplete="name">
 <label>Firmá con el dedo en el recuadro</label>
 <canvas id="pad"></canvas>
 <p><button type="button" class="btn sec small" id="clr">Borrar y volver a firmar</button></p>
 <label class="consent"><input type="checkbox" id="ok"><span>Leí el documento y acepto firmarlo electrónicamente. Entiendo que quedan registrados mi firma, fecha, hora, dirección IP y dispositivo.</span></label>
+<button class="btn" id="go" style="width:100%" disabled>Revisar mi firma</button></div>
+<div class="card" id="review" style="display:none"><h2>Revisá tu firma</h2>
+<p class="mut">Así va a quedar tu firma. Si no te gusta, podés rehacerla.</p>
+<img id="prev" alt="Tu firma" style="width:100%;max-height:220px;object-fit:contain;border:1px solid var(--line);border-radius:10px;background:#fff">
+<p><b id="prevname"></b></p>
 <div id="msg"></div>
-<button class="btn" id="go" style="width:100%" disabled>Firmar documento</button></div>`;
+<button class="btn" id="confirm" style="width:100%">Confirmar y firmar</button>
+<p><button type="button" class="btn sec" id="redo" style="width:100%">Rehacer mi firma</button></p></div>`;
   const script = `<script type="module">
 (async function(){
   var box=document.getElementById('pages');
@@ -279,29 +323,45 @@ app.get('/firmar/:token', (req, res) => {
       box.appendChild(cv);
       await pg.render({canvasContext:cv.getContext('2d'),viewport:v}).promise;
     }
-  }catch(e){console.log('PDFERR',e&&e.message);
+  }catch(e){
     box.innerHTML='<p style="padding:16px">No se pudo mostrar el documento acá. <a href="/firmar/${s.token}/pdf" target="_blank">Tocá para abrirlo</a>.</p>';
   }
 })();
 (function(){
 var c=document.getElementById('pad'),ctx=c.getContext('2d'),drawn=false,down=false,last=null,pts=0;
-function size(){var r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;var img=drawn?c.toDataURL():null;c.width=r.width*d;c.height=r.height*d;ctx.scale(d,d);ctx.lineWidth=2.6;ctx.lineCap='round';ctx.lineJoin='round';ctx.strokeStyle='#111';if(img){var i=new Image();i.onload=function(){ctx.drawImage(i,0,0,r.width,r.height)};i.src=img}}
+function size(){var r=c.getBoundingClientRect();if(!r.width)return;var d=window.devicePixelRatio||1;var img=drawn?c.toDataURL():null;c.width=r.width*d;c.height=r.height*d;ctx.scale(d,d);ctx.lineWidth=2.6;ctx.lineCap='round';ctx.lineJoin='round';ctx.strokeStyle='#111';if(img){var i=new Image();i.onload=function(){ctx.drawImage(i,0,0,r.width,r.height)};i.src=img}}
 size();window.addEventListener('resize',size);
 function pos(e){var r=c.getBoundingClientRect();return{x:e.clientX-r.left,y:e.clientY-r.top}}
 c.addEventListener('pointerdown',function(e){e.preventDefault();c.setPointerCapture(e.pointerId);down=true;last=pos(e);ctx.beginPath();ctx.arc(last.x,last.y,1.2,0,6.3);ctx.fill();});
 c.addEventListener('pointermove',function(e){if(!down)return;e.preventDefault();var p=pos(e);ctx.beginPath();ctx.moveTo(last.x,last.y);ctx.lineTo(p.x,p.y);ctx.stroke();last=p;pts++;drawn=true;upd();});
 function end(){down=false}
 c.addEventListener('pointerup',end);c.addEventListener('pointercancel',end);c.addEventListener('pointerleave',end);
-document.getElementById('clr').onclick=function(){var r=c.getBoundingClientRect();ctx.clearRect(0,0,r.width,r.height);drawn=false;pts=0;upd();};
+function clearPad(){var r=c.getBoundingClientRect();ctx.clearRect(0,0,r.width,r.height);drawn=false;pts=0;upd();}
+document.getElementById('clr').onclick=clearPad;
 var ok=document.getElementById('ok'),go=document.getElementById('go'),nm=document.getElementById('nm'),msg=document.getElementById('msg');
+var formcard=document.getElementById('formcard'),review=document.getElementById('review'),confirmBtn=document.getElementById('confirm');
 function upd(){go.disabled=!(drawn&&pts>8&&ok.checked&&nm.value.trim().length>1)}
 ok.onchange=upd;nm.oninput=upd;
+var shot=null;
 go.onclick=function(){
-  go.disabled=true;go.textContent='Firmando…';msg.innerHTML='';
-  fetch('/firmar/${s.token}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nm.value.trim(),consent:true,signature:c.toDataURL('image/png')})})
+  shot=c.toDataURL('image/png');
+  document.getElementById('prev').src=shot;
+  document.getElementById('prevname').textContent=nm.value.trim();
+  msg.innerHTML='';
+  formcard.style.display='none';review.style.display='block';
+  review.scrollIntoView({behavior:'smooth',block:'start'});
+};
+document.getElementById('redo').onclick=function(){
+  review.style.display='none';formcard.style.display='block';
+  drawn=false;pts=0;size();upd();shot=null;
+  formcard.scrollIntoView({behavior:'smooth',block:'start'});
+};
+confirmBtn.onclick=function(){
+  confirmBtn.disabled=true;confirmBtn.textContent='Firmando…';msg.innerHTML='';
+  fetch('/firmar/${s.token}',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:nm.value.trim(),consent:true,signature:shot})})
   .then(function(r){return r.json().then(function(j){return{ok:r.ok,j:j}})})
   .then(function(x){if(x.ok){location.reload()}else{throw new Error(x.j.error||'Error')}})
-  .catch(function(e){msg.innerHTML='<div class="err">'+e.message+'</div>';go.textContent='Firmar documento';upd()});
+  .catch(function(e){msg.innerHTML='<div class="err">'+e.message+'</div>';confirmBtn.disabled=false;confirmBtn.textContent='Confirmar y firmar'});
 };
 })();
 </script>`;
@@ -311,6 +371,7 @@ go.onclick=function(){
 app.get('/firmar/:token/pdf', (req, res) => {
   const s = loadSigner(req.params.token);
   if (!s) return res.status(404).send('No existe');
+  if (s.revoked_at) return res.status(410).send('Documento revocado');
   res.set('Cache-Control', 'private, no-store');
   res.type('pdf').sendFile(path.join(DATA_DIR, 'docs', path.basename(s.doc_id) + '.pdf'));
 });
@@ -325,6 +386,7 @@ app.post('/firmar/:token', async (req, res) => {
   try {
     const s = loadSigner(req.params.token);
     if (!s) return res.status(404).json({ error: 'Link no válido' });
+    if (s.revoked_at) return res.status(409).json({ error: 'Este documento fue revocado y ya no se puede firmar' });
     if (s.status === 'firmado') return res.status(409).json({ error: 'Ya firmaste este documento' });
     const { name, consent, signature } = req.body || {};
     if (consent !== true) return res.status(400).json({ error: 'Tenés que aceptar el consentimiento' });
@@ -338,7 +400,7 @@ app.post('/firmar/:token', async (req, res) => {
       .run(new Date().toISOString(), nm, clientIp(req), String(req.get('user-agent') || '').slice(0, 300), png, s.id);
     if (!upd.changes) return res.status(409).json({ error: 'Ya firmaste este documento' });
     const pend = db.prepare("SELECT COUNT(*) n FROM signers WHERE doc_id=? AND status!='firmado'").get(s.doc_id).n;
-    if (pend === 0) await buildFinal(s.doc_id);
+    if (pend === 0) await buildFinal(s.doc_id, baseUrl(req));
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -370,7 +432,7 @@ function wrap(font, text, size, maxW) {
   }
   return out;
 }
-async function buildFinal(docId) {
+async function buildFinal(docId, base) {
   const d = db.prepare('SELECT * FROM documents WHERE id=?').get(docId);
   const sg = db.prepare('SELECT * FROM signers WHERE doc_id=? ORDER BY id').all(docId);
   const orig = fs.readFileSync(path.join(DATA_DIR, 'docs', docId + '.pdf'));
@@ -383,8 +445,15 @@ async function buildFinal(docId) {
   // Hoja de firmas
   let page = pdf.addPage([W, H]); let y = H - M;
   page.drawText('Hoja de firmas', { x: M, y: y - 8, size: 22, font: bold, color: ink }); y -= 38;
-  for (const l of wrap(font, 'Documento: ' + d.title, 11, W - 2 * M)) { page.drawText(l, { x: M, y, size: 11, font }); y -= 15; }
-  y -= 10;
+  // QR para consultar el estado actual del documento (vigente / revocado)
+  const verifyUrl = `${base}/v/${d.id}`;
+  const qrImg = await pdf.embedPng(await QRCode.toBuffer(verifyUrl, { margin: 1, width: 240, errorCorrectionLevel: 'M' }));
+  page.drawImage(qrImg, { x: W - M - 76, y: H - M - 66, width: 76, height: 76 });
+  ['Escanea para consultar', 'el estado de este documento'].forEach((t, i) => {
+    page.drawText(t, { x: W - M - 76 - 8 - font.widthOfTextAtSize(t, 8), y: H - M - 30 - i * 11, size: 8, font, color: rgb(0.35, 0.37, 0.5) });
+  });
+  for (const l of wrap(font, 'Documento: ' + d.title, 11, W - 2 * M - 170)) { page.drawText(l, { x: M, y, size: 11, font }); y -= 15; }
+  y = Math.min(y - 10, H - M - 66 - 14); // deja lugar para el QR
   for (const s of sg) {
     if (y < 190) { page = pdf.addPage([W, H]); y = H - M; }
     page.drawRectangle({ x: M, y: y - 150, width: W - 2 * M, height: 150, borderColor: rgb(0.78, 0.8, 0.88), borderWidth: 1 });
@@ -410,6 +479,7 @@ async function buildFinal(docId) {
   line('Documento', d.title);
   line('Huella SHA-256 del documento original (antes de firmar)', d.sha256, mono);
   line('Creado', fmtDate(d.created_at));
+  line('Consulta del estado actual (vigente / revocado)', verifyUrl, mono);
   for (const s of sg) {
     if (y < 150) { page = pdf.addPage([W, H]); y = H - M; }
     page.drawLine({ start: { x: M, y: y + 6 }, end: { x: W - M, y: y + 6 }, thickness: 0.5, color: rgb(0.8, 0.8, 0.85) }); y -= 8;
@@ -427,6 +497,49 @@ async function buildFinal(docId) {
   db.prepare("UPDATE documents SET status='firmado', completed_at=?, final_sha256=? WHERE id=?").run(new Date().toISOString(), sha256(out), docId);
 }
 
+// ---------- constancia de revocación ----------
+async function buildRevocationPdf(d, sg, base) {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const mono = await pdf.embedFont(StandardFonts.Courier);
+  const W = 595, H = 842, M = 56, red = rgb(0.56, 0.11, 0.09);
+  let page = pdf.addPage([W, H]); let y = H - M;
+  page.drawText('Constancia de revocacion', { x: M, y: y - 8, size: 22, font: bold, color: red }); y -= 44;
+  const line = (label, value, f = font) => {
+    page.drawText(safe(label), { x: M, y, size: 10, font: bold, color: rgb(0.35, 0.37, 0.5) }); y -= 14;
+    const size = f === mono ? 9 : 11;
+    for (const l of wrap(f, value, size, W - 2 * M)) { if (y < M) { page = pdf.addPage([W, H]); y = H - M; } page.drawText(l, { x: M, y, size, font: f }); y -= 14; }
+    y -= 8;
+  };
+  const signed = sg.filter((s) => s.status === 'firmado').length;
+  line('Documento', d.title);
+  line('Estado antes de la revocacion', d.status === 'firmado' ? `Firmado por todas las partes el ${fmtDate(d.completed_at)}` : `Incompleto: ${signed} de ${sg.length} firmas`);
+  line('Fecha y hora de la revocacion', `${fmtDate(d.revoked_at)}  (UTC: ${d.revoked_at})`);
+  line('Motivo declarado', d.revoked_reason);
+  line('Direccion IP desde la que se registro', d.revoked_ip || '-');
+  for (const s of sg) line('Firmante', `${s.signed_name || s.name} - ${s.status === 'firmado' ? 'firmo el ' + fmtDate(s.signed_at) : 'no llego a firmar'}`);
+  line('Huella SHA-256 del documento original', d.sha256, mono);
+  if (d.final_sha256) line('Huella SHA-256 del PDF firmado', d.final_sha256, mono);
+  line('Consulta del estado en linea', `${base}/v/${d.id}`, mono);
+  y -= 6;
+  for (const l of wrap(font, 'Esta constancia deja registro de que el documento dejo de estar vigente a partir de la fecha indicada. La revocacion no modifica ni elimina el documento firmado ni sus pruebas, que se conservan intactos. Sus efectos legales dependen de lo establecido en el contrato y en la normativa aplicable.', 9.5, W - 2 * M)) { page.drawText(l, { x: M, y, size: 9.5, font, color: rgb(0.3, 0.3, 0.3) }); y -= 13; }
+  pdf.setTitle('Constancia de revocacion - ' + safe(d.title));
+  pdf.setProducer(BRAND);
+  return Buffer.from(await pdf.save());
+}
+
+// ---------- página pública de estado (la abre el QR) ----------
+app.get('/v/:id', (req, res) => {
+  const d = db.prepare('SELECT * FROM documents WHERE id=?').get(String(req.params.id));
+  if (!d) return res.status(404).send(page('No encontrado', '<div class="card"><h1>Documento no encontrado</h1></div>', req));
+  const sg = db.prepare('SELECT signed_name,name,status,signed_at FROM signers WHERE doc_id=? ORDER BY id').all(d.id);
+  const state = d.revoked_at
+    ? `<div class="err"><b>REVOCADO.</b> Este documento fue revocado el ${fmtDate(d.revoked_at)} y <b>ya no está vigente</b>.</div>`
+    : (d.status === 'firmado' ? '<div class="ok"><b>VIGENTE.</b> Firmado por todas las partes y sin revocaciones registradas.</div>' : '<div class="err" style="background:#fff0d6;color:#8a5200"><b>PENDIENTE.</b> Todavía faltan firmas.</div>');
+  res.send(page('Estado del documento', `<h1>Estado del documento</h1>${state}<div class="card"><b>${esc(d.title)}</b><ul>${sg.map((s) => `<li>${esc(s.signed_name || s.name)} — ${s.status === 'firmado' ? 'firmó el ' + fmtDate(s.signed_at) : 'sin firmar'}</li>`).join('')}</ul>${d.final_sha256 ? `<div class="mut">Huella SHA-256 del PDF firmado:<br><span class="mono">${d.final_sha256}</span></div>` : ''}</div><p class="mut">Para comprobar que tu copia del PDF no fue modificada, usá <a href="/verificar">verificar documento</a>.</p>`, req, { admin: isAdmin(req) }));
+});
+
 // ---------- verificación pública ----------
 app.get('/verificar', (req, res) => {
   res.send(page('Verificar documento', `<h1>Verificar un documento firmado</h1><div class="card"><p>Subí un PDF firmado y comprobamos si es exactamente el que se emitió acá (sin modificaciones).</p><form method="post" action="/verificar" enctype="multipart/form-data"><input type="file" name="pdf" accept="application/pdf" required><p><button class="btn">Verificar</button></p></form></div>`, req, { admin: isAdmin(req) }));
@@ -439,7 +552,8 @@ app.post('/verificar', upload.single('pdf'), (req, res) => {
     const d = db.prepare('SELECT * FROM documents WHERE final_sha256=?').get(h);
     if (d) {
       const sg = db.prepare('SELECT signed_name,name,signed_at FROM signers WHERE doc_id=? ORDER BY id').all(d.id);
-      result = `<div class="ok"><b>✓ Documento auténtico.</b> Es el PDF firmado emitido por ${esc(BRAND)} y no fue modificado.</div><div class="card"><b>${esc(d.title)}</b><ul>${sg.map((s) => `<li>${esc(s.signed_name || s.name)} — ${fmtDate(s.signed_at)}</li>`).join('')}</ul><div class="mut">Huella SHA-256:<br><span class="mono">${h}</span></div></div>`;
+      const revNote = d.revoked_at ? `<div class="err"><b>REVOCADO.</b> Este documento fue revocado el ${fmtDate(d.revoked_at)} y <b>ya no está vigente</b>.</div>` : '<div class="ok"><b>VIGENTE.</b> No hay revocaciones registradas.</div>';
+      result = `<div class="ok"><b>✓ Documento auténtico.</b> Es el PDF firmado emitido por ${esc(BRAND)} y no fue modificado.</div>${revNote}<div class="card"><b>${esc(d.title)}</b><ul>${sg.map((s) => `<li>${esc(s.signed_name || s.name)} — ${fmtDate(s.signed_at)}</li>`).join('')}</ul><div class="mut">Huella SHA-256:<br><span class="mono">${h}</span></div></div>`;
     } else {
       result = `<div class="err"><b>No coincide.</b> Este archivo no es un PDF firmado emitido acá, o fue modificado después de firmarse.</div><div class="mut">Huella SHA-256:<br><span class="mono">${h}</span></div>`;
     }
