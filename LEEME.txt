@@ -9,6 +9,26 @@ COMO FUNCIONA
 4. Cuando firman todos, descargas el PDF final con la hoja de firmas y el
    expediente de evidencias (huella SHA-256, fecha, hora, IP, dispositivo).
 5. En /verificar cualquiera puede subir el PDF firmado y comprobar que es autentico.
+6. Revocar: solo vos, desde el panel (boton "Revocar este documento", con motivo).
+   Queda estado REVOCADO, constancia en PDF, y la verificacion/QR muestran que ya no esta vigente.
+   El documento y sus pruebas no se borran. No se puede deshacer.
+7. El firmante revisa su firma antes de confirmar y puede rehacerla.
+
+RECIBOS DE SENA (menu "Recibos")
+1. Recibos > Nuevo recibo de sena: cargas quien paga, importe, fecha, forma de pago y concepto.
+   Se genera un PDF con tu firma, numero correlativo, importe en letras y un QR de verificacion.
+   Opcionalmente lo vinculas a un documento firmado.
+2. Enviarlo: desde el detalle del recibo, boton "Enviar por WhatsApp" (o copiar el link).
+   La persona recibe un link para ver/descargar el PDF.
+3. Revocar: solo vos (hay que estar logueado como administrador). Pide motivo, no se puede deshacer.
+   El recibo original se conserva intacto; el link y el QR pasan a mostrar REVOCADO, la persona
+   ve la copia con marca "REVOCADO", y queda una constancia de revocacion en PDF con tu firma.
+   Desde el mismo recibo podes avisarle por WhatsApp que fue revocado.
+4. Los recibos nunca se borran (para que la numeracion no tenga saltos); solo se revocan.
+5. Ajustes: ahi cargas tus datos (nombre, CUIT/DNI, domicilio) y cambias tu firma.
+   Tu firma esta en assets/firma-admin.png y NO se sube a GitHub (esta en .gitignore).
+   En el servidor publicado, entra a Ajustes y subi tu firma una vez: queda guardada en /data.
+6. El recibo es un comprobante electronico NO FISCAL: no reemplaza una factura.
 
 PROBARLO EN TU COMPUTADORA
   npm install
@@ -24,6 +44,7 @@ PUBLICARLO EN TU SERVIDOR (DonWeb + Coolify)
      ADMIN_PASSWORD = una clave larga y tuya
      DATA_DIR       = /data
      BRAND_NAME     = el nombre de tu servicio (opcional)
+     BASE_URL       = https://tu-dominio-final (para que el QR y los links usen siempre ese dominio)
 4. En Storages agrega un Volume Mount con destino /data
    (ahi se guardan documentos, firmas y base de datos; sin esto se pierden al actualizar).
 5. En Domains pone https://firma.tudominio.com.ar y crea en tu DNS un registro A
@@ -35,5 +56,5 @@ LIMITES ACTUALES (version 1)
   No reemplaza firma digital con certificado ni actos que exigen escribano.
 - La firma queda en una "Hoja de firmas" agregada al final del PDF (no se elige
   el lugar exacto dentro de la pagina).
-- Los links los enviás vos (WhatsApp/email manual); no hay envios ni recordatorios automaticos.
+- Los links de firma los enviás vos (WhatsApp/email manual); no hay recordatorios automaticos.
 - Sin verificacion de identidad por SMS o selfie.

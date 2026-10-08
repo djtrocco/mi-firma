@@ -10,11 +10,13 @@
     "node": ">=18"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3",
     "express": "^5.2.1",
     "multer": "^2.4.0",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.3.289",
     "qrcode": "^1.5.4"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^13.0.3"
   }
 }

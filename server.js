@@ -1,7 +1,8 @@
 'use strict';
 const express = require('express');
 const multer = require('multer');
-const Database = require('better-sqlite3');
+let Database;
+try { Database = require('better-sqlite3'); } catch { Database = require('./sqlite-shim'); }
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const QRCode = require('qrcode');
 const crypto = require('crypto');
@@ -97,14 +98,14 @@ function tooMany(ip) {
 const CSS = `
 :root{--ink:#1F2170;--ink2:#2d30a0;--bg:#f5f6fb;--card:#fff;--tx:#1b1d2b;--mut:#666b85;--ok:#14804a;--warn:#b26a00;--line:#e3e5f0}
 *{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx);line-height:1.45}
-header{background:var(--ink);color:#fff;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+header{background:var(--ink);color:#fff;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 header a{color:#fff;text-decoration:none}header .logo{font-weight:700;font-size:20px}
 header nav a{margin-left:14px;font-size:15px;opacity:.9}
 main{max-width:860px;margin:0 auto;padding:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
 h1{font-size:22px;margin:6px 0 14px}h2{font-size:17px;margin:0 0 10px}
 label{display:block;font-weight:600;margin:12px 0 4px;font-size:14px}
-input[type=text],input[type=password],input[type=file],textarea{width:100%;padding:12px;border:1px solid #c9cde0;border-radius:8px;font-size:16px;background:#fff}
+input[type=text],input[type=password],input[type=file],input[type=date],select,textarea{width:100%;padding:12px;border:1px solid #c9cde0;border-radius:8px;font-size:16px;background:#fff}
 .btn{display:inline-block;background:var(--ink);color:#fff;border:0;border-radius:10px;padding:13px 18px;font-size:16px;font-weight:600;cursor:pointer;text-decoration:none;text-align:center}
 .btn:hover{background:var(--ink2)}.btn.sec{background:#fff;color:var(--ink);border:1px solid var(--ink)}
 .btn.wa{background:#1fa855}.btn.red{background:#b3261e}.btn.small{padding:8px 12px;font-size:14px}
@@ -120,7 +121,7 @@ code,.mono{font-family:ui-monospace,Menlo,monospace;font-size:13px;word-break:br
 .link{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 `;
 function page(title, body, req, opts = {}) {
-  const nav = opts.admin ? `<nav><a href="/">Documentos</a><a href="/nuevo">Nuevo</a><a href="/verificar">Verificar</a><form method="post" action="/logout" style="display:inline"><button class="btn small sec" style="margin-left:14px">Salir</button></form></nav>` : '';
+  const nav = opts.admin ? `<nav><a href="/">Documentos</a><a href="/nuevo">Nuevo</a><a href="/recibos">Recibos</a><a href="/verificar">Verificar</a><a href="/ajustes">Ajustes</a><form method="post" action="/logout" style="display:inline"><button class="btn small sec" style="margin-left:14px">Salir</button></form></nav>` : '';
   return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title)} · ${esc(BRAND)}</title><style>${CSS}${opts.css || ''}</style></head><body><header><a class="logo" href="/">${esc(BRAND)}</a>${nav}</header><main>${body}</main>${opts.script || ''}</body></html>`;
 }
 
@@ -550,7 +551,10 @@ app.post('/verificar', upload.single('pdf'), (req, res) => {
   else {
     const h = sha256(req.file.buffer);
     const d = db.prepare('SELECT * FROM documents WHERE final_sha256=?').get(h);
-    if (d) {
+    const rec = d ? null : recibos.verifyByHash(h);
+    if (rec) {
+      result = rec;
+    } else if (d) {
       const sg = db.prepare('SELECT signed_name,name,signed_at FROM signers WHERE doc_id=? ORDER BY id').all(d.id);
       const revNote = d.revoked_at ? `<div class="err"><b>REVOCADO.</b> Este documento fue revocado el ${fmtDate(d.revoked_at)} y <b>ya no está vigente</b>.</div>` : '<div class="ok"><b>VIGENTE.</b> No hay revocaciones registradas.</div>';
       result = `<div class="ok"><b>✓ Documento auténtico.</b> Es el PDF firmado emitido por ${esc(BRAND)} y no fue modificado.</div>${revNote}<div class="card"><b>${esc(d.title)}</b><ul>${sg.map((s) => `<li>${esc(s.signed_name || s.name)} — ${fmtDate(s.signed_at)}</li>`).join('')}</ul><div class="mut">Huella SHA-256:<br><span class="mono">${h}</span></div></div>`;
@@ -560,6 +564,9 @@ app.post('/verificar', upload.single('pdf'), (req, res) => {
   }
   res.send(page('Verificar documento', `<h1>Resultado</h1>${result}<p><a href="/verificar">Verificar otro</a></p>`, req, { admin: isAdmin(req) }));
 });
+
+// ---------- recibos de seña (ver recibos.js) ----------
+const recibos = require('./recibos')({ app, db, page, esc, fmtDate, requireAdmin, isAdmin, upload, baseUrl, clientIp, sha256, newId, newToken, safe, wrap, DATA_DIR, BRAND });
 
 app.use((err, req, res, next) => {
   console.error(err);

@@ -1,0 +1,6 @@
+node_modules
+data
+*.zip
+.DS_Store
+
+assets/firma-admin.png
